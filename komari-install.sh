@@ -113,7 +113,7 @@ echo ""
 log_config "Installation configuration:"
 log_config "  Service name: ${GREEN}$service_name${NC}"
 log_config "  Install directory: ${GREEN}$target_dir${NC}"
-log_config "  GitHub proxy: ${GREEN}${github_proxy:-"(direct)"}${NC}"
+log_config "  GitHub proxy: ${GREEN}${github_proxy:-"(direct then fallback)"}${NC}"
 log_config "  Binary arguments: ${GREEN}$komari_args${NC}"
 if [ -n "$install_version" ]; then
     log_config "  Specified agent version: ${GREEN}$install_version${NC}"
@@ -197,24 +197,50 @@ else
     download_path="download/${version_to_install}"
 fi
 
-if [ -n "$github_proxy" ]; then
-    download_url="${github_proxy}/https://github.com/komari-monitor/komari-agent/releases/${download_path}/${file_name}"
-else
-    download_url="https://github.com/komari-monitor/komari-agent/releases/${download_path}/${file_name}"
-fi
+# Built-in proxy fallback list (verified working)
+builtin_proxies=("https://gh-proxy.com" "https://gh.dpik.top")
+
+base_url="https://github.com/komari-monitor/komari-agent/releases/${download_path}/${file_name}"
 
 log_step "Creating installation directory: ${GREEN}$target_dir${NC}"
 mkdir -p "$target_dir"
 
+# Build download URL list with fallback chain
+urls_to_try=()
 if [ -n "$github_proxy" ]; then
-    log_step "Downloading $file_name via proxy..."
-    log_info "URL: ${CYAN}$download_url${NC}"
-else
-    log_step "Downloading $file_name directly..."
-    log_info "URL: ${CYAN}$download_url${NC}"
+    urls_to_try+=("${github_proxy}/${base_url}")
 fi
-if ! curl -L -o "$komari_agent_path" "$download_url"; then
-    log_error "Download failed"
+urls_to_try+=("$base_url")
+for p in "${builtin_proxies[@]}"; do
+    if [ "$p" != "$github_proxy" ]; then
+        urls_to_try+=("${p}/${base_url}")
+    fi
+done
+
+download_ok=false
+for url in "${urls_to_try[@]}"; do
+    log_step "Downloading from: ${CYAN}$url${NC}"
+    if curl -fL -o "$komari_agent_path" "$url" 2>/dev/null; then
+        file_type=$(file "$komari_agent_path" 2>/dev/null)
+        if echo "$file_type" | grep -qi "ELF"; then
+            log_success "Download successful (valid ELF binary)"
+            download_ok=true
+            break
+        elif echo "$file_type" | grep -qiE "HTML|XML"; then
+            log_warning "Server returned error page, trying next..."
+            rm -f "$komari_agent_path"
+        else
+            log_warning "Unexpected file type: $file_type, trying next..."
+            rm -f "$komari_agent_path"
+        fi
+    else
+        log_warning "Download failed, trying next..."
+    fi
+done
+
+if [ "$download_ok" = false ]; then
+    log_error "All download methods failed"
+    log_error "If you are in a restricted network, try: --install-ghproxy https://gh-proxy.com"
     exit 1
 fi
 
